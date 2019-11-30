@@ -4,20 +4,39 @@ from math import e as E
 from math import sqrt
 import json
 
+def calc_hi(T, RH):
+    HI = 0.5 * (T + 61.0 + ((T-68.0)*1.2) + (RH*0.094))
+    HI = (HI + T) / 2
 
-class MultidayForecast():
+    if HI >= 80:
+        ADJUSTMENT = 0
+        if RH <= 13 and 80 >= T >= 112:
+            ADJUSTMENT = ((13-RH)/4)*sqrt((17-abs(T-95.))/17)
+        elif RH >= 85 and 80 >= T >= 87:
+            ADJUSTMENT = ((RH-85)/10) * ((87-T)/5)
+
+        HI = -42.379 + 2.04901523*T + 10.14333127*RH - .22475541*T*RH - .00683783*T*T - .05481717*RH*RH + .00122874*T*T*RH + .00085282*T*RH*RH - .00000199*T*T*RH*RH
+        HI -= ADJUSTMENT
+
+    return HI
+
+def calc_wc(T,V):
+    WC = 35.74 + 0.6215*T - 35.75*pow(V,0.16) + 0.4275*T*pow(V,0.16)
+    return WC
+
+
+class Forecast():
     def __init__(self, forecast=None):
         self.cnx = sqlite3.connect(":memory:")
-        self.cursor = self.cnx.cursor()
-        self.cursor.execute('''CREATE TABLE weather 
-            (_id INTEGER PRIMARY KEY AUTOINCREMENT, dt timestamp, temp_avg FLOAT, 
-            temp_hi FLOAT, temp_lo FLOAT, humidity FLOAT, clouds INT, wind INT, rain FLOAT, 
-            snow FLOAT, wind_chill FLOAT, heat_index FLOAT);''')
-        
         self.cnx.create_function(
             "APPARENT_TEMPERATURE", 3,
             self.__apparent_temp
         )
+        
+        self.cnx.execute('''CREATE TABLE weather 
+            (_id INTEGER PRIMARY KEY AUTOINCREMENT, dt timestamp, temp_avg FLOAT, 
+            temp_hi FLOAT, temp_lo FLOAT, humidity FLOAT, clouds INT, wind INT, rain FLOAT, 
+            snow FLOAT, wind_chill FLOAT, heat_index FLOAT, apparent_temp FLOAT);''')
 
         self.cnx.commit()
 
@@ -25,16 +44,13 @@ class MultidayForecast():
             self.populate(forecast)
 
     def __del__(self):
-        self.cursor.close()
         self.cnx.close()
-
-        del self.cursor
         del self.cnx
 
     def __repr__(self):
         try:
             query = "SELECT * FROM weather;"
-            results = self.cursor.execute(query).fetchall()
+            results = self.cnx.execute(query).fetchall()
             return "\n".join([r for r in results])
 
         except Exception as e:
@@ -44,7 +60,6 @@ class MultidayForecast():
         days = forecast["list"]
         try:
             for data in days:
-
                 date = datetime.strptime(
                     data['dt_txt'], "%Y-%m-%d %X").timestamp()
                 temp_avg = data['main']['temp']
@@ -59,20 +74,22 @@ class MultidayForecast():
                 snow = 0 if 'snow' not in data else data['snow']
                 if isinstance(snow, dict):
                     snow = 0 if '3h' not in snow else snow['3h']
-                wind_chill = 0  # create
-                heat_index = 0  # create
+                wind_chill = calc_wc(temp_avg,wind)
+                heat_index = calc_hi(temp_avg,humidity)
+                apparent_temp = self.__apparent_temp(temp_avg,humidity,wind)
 
                 query = ''' 
                     INSERT INTO weather(
                         dt, temp_avg, temp_hi, temp_lo, humidity,
-                        clouds, wind, rain, snow, wind_chill, heat_index
+                        clouds, wind, rain, snow, wind_chill, heat_index,
+                        apparent_temp
                     ) VALUES (
-                        {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}
+                        {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}
                     );
                 '''.format(date, temp_avg, temp_hi, temp_lo, humidity, clouds, wind, 
-                    rain, snow, wind_chill, heat_index)
+                    rain, snow, wind_chill, heat_index, apparent_temp)
 
-                self.cursor.execute(query)
+                self.cnx.execute(query)
 
         except Exception as e:
             print(e)
@@ -133,12 +150,16 @@ class MultidayForecast():
     def highest_temp(self, start_dt=None, end_dt=None):
         start_dt, end_dt = self.__time_range(start_dt, end_dt)
         try:
-            query = f"SELECT DATETIME(dt,\'unixepoch\'),MAX(temp_hi) FROM weather WHERE dt BETWEEN {start_dt} AND {end_dt};"
-            results = self.cursor.execute(query).fetchone()
-            return {
-                "dt": results[0],
-                "temp":results[1]
-            }
+            query = '''
+                SELECT 
+                    DATETIME(dt,\'unixepoch\'),
+                    MAX(temp_hi) 
+                FROM weather 
+                WHERE dt BETWEEN {} AND {};
+            '''.format(start_dt,end_dt)
+
+            results = self.cnx.execute(query).fetchone()
+            return {"dt": results[0],"temp":results[1]}
 
         except Exception as e:
             print(e)
@@ -147,11 +168,8 @@ class MultidayForecast():
         start_dt, end_dt = self.__time_range(start_dt, end_dt)
         try:
             query = f"SELECT DATETIME(dt,\'unixepoch\'),MIN(temp_lo) FROM weather WHERE dt BETWEEN {start_dt} AND {end_dt};"
-            results = self.cursor.execute(query).fetchone()
-            return {
-                "dt": results[0],
-                "temp":results[1]
-            }
+            results = self.cnx.execute(query).fetchone()
+            return {"dt": results[0],"temp":results[1]}
 
         except Exception as e:
             print(e)
@@ -164,7 +182,7 @@ class MultidayForecast():
                 WHERE DATE(dt,\'unixepoch\')=DATE({},\'unixepoch\')
             '''.format(date.timestamp())
 
-            result = self.cursor.execute(query).fetchone()
+            result = self.cnx.execute(query).fetchone()
             return {"dt": result[0], "temp": result[1]}
 
         except Exception as e:
@@ -177,7 +195,7 @@ class MultidayForecast():
                 WHERE DATE(dt,\'unixepoch\')=DATE({},\'unixepoch\')
             '''.format(date.timestamp())
 
-            results = self.cursor.execute(query).fetchall()
+            results = self.cnx.execute(query).fetchall()
             return [
                 {
                     "dt": res[1],
@@ -191,6 +209,7 @@ class MultidayForecast():
                     "snow": res[9],
                     "wind_chill": res[10],
                     "heat_index": res[11],
+                    "apparent_temp": res[12]
                 } for res in results
             ]
 
@@ -210,12 +229,10 @@ class MultidayForecast():
             GROUP BY DATE(dt,\'unixepoch\')
         '''.format(start_dt, end_dt)
 
-        results = self.cursor.execute(query).fetchall()
+        results = self.cnx.execute(query).fetchall()
         return [
-            {
-                "dt": result[0],
-                "rain": result[1]
-            } for result in results
+            {"dt": result[0],"rain": result[1]} 
+            for result in results
         ]
     
     def snowy_days(self, start_dt=None, end_dt=None):
@@ -231,12 +248,10 @@ class MultidayForecast():
             GROUP BY DATE(dt,\'unixepoch\')
         '''.format(start_dt, end_dt)
 
-        results = self.cursor.execute(query).fetchall()
+        results = self.cnx.execute(query).fetchall()
         return [
-            {
-                "dt": result[0],
-                "snow": result[1]
-            } for result in results
+            {"dt": result[0],"snow": result[1]} 
+            for result in results
         ]
 
     def rainiest_day(self, start_dt=None, end_dt=None):
@@ -254,11 +269,8 @@ class MultidayForecast():
                 SELECT dt,MAX(rain) rain FROM sums
             '''.format(start_dt, end_dt)
 
-            result = self.cursor.execute(query).fetchone()
-            return {
-                "dt": result[0],
-                "rain": result[1]
-            }
+            result = self.cnx.execute(query).fetchone()
+            return {"dt": result[0],"rain": result[1]}
 
         except Exception as e:
             print(e)
@@ -267,22 +279,19 @@ class MultidayForecast():
         start_dt, end_dt = self.__time_range(start_dt, end_dt)
         try:
             query = '''
-                with sums as (
-                    select 
-                        DATE(dt,\'unixepoch\') as dt, 
-                        SUM(snow) as snow 
+                WITH sums AS (
+                    SELECT 
+                        DATE(dt,\'unixepoch\') AS dt, 
+                        SUM(snow) AS snow 
                     FROM weather 
-                    WHERE dt BETWEEN {} and {}
+                    WHERE dt BETWEEN {} AND {}
                     GROUP BY DATE(dt,\'unixepoch\')
                 )
                 SELECT dt,MAX(snow) snow FROM sums
             '''.format(start_dt, end_dt)
 
-            results = list(self.cursor.execute(query))[0]
-            return {
-                "dt": results[0],
-                "snow": results[1]
-            }
+            result = self.cnx.execute(query).fetchone()
+            return {"dt": result[0],"snow": result[1]}
 
         except Exception as e:
             print(e)
@@ -291,29 +300,19 @@ class MultidayForecast():
         start_dt, end_dt = self.__time_range(start_dt, end_dt)
         try:
             query = '''
-                WITH temps AS (
-                    SELECT
-                        AVG(temp_avg) AS temp_avg, 
-                        AVG(humidity) AS humidity, 
-                        AVG(wind) AS wind,
-                        DATE(dt,\'unixepoch\') AS dt
+                WITH avgs AS (
+                    SELECT 
+                        dt,
+                        AVG(apparent_temp) as apt
                     FROM weather
                     WHERE dt BETWEEN {} AND {}
-                    GROUP BY DATE(dt, \'unixepoch\')
-                ), apts AS (
-                    SELECT 
-                        APPARENT_TEMPERATURE(temp_avg, humidity, wind) AS apt, 
-                        dt 
-                    FROM temps
+                    GROUP BY DATE(dt,\'unixepoch\')
                 )
-                SELECT dt, MAX(apt) FROM apts
+                SELECT DATE(dt,\'unixepoch\'),MAX(apt) from avgs
             '''.format(start_dt, end_dt)
 
-            result = self.cursor.execute(query).fetchone()
-            return {
-                "dt": result[0],
-                "temp": result[1]
-            }
+            result = self.cnx.execute(query).fetchone()
+            return {"dt": result[0], "temp": result[1]}
 
         except Exception as e:
             print(e)
@@ -340,11 +339,8 @@ class MultidayForecast():
                 SELECT dt, MIN(apt) FROM apts
             '''.format(start_dt, end_dt)
 
-            result = self.cursor.execute(query).fetchone()
-            return {
-                "dt": result[0],
-                "temp": result[1]
-            }
+            result = self.cnx.execute(query).fetchone()
+            return {"dt": result[0],"temp": result[1]}
 
         except Exception as e:
             print(e)
@@ -352,13 +348,9 @@ class MultidayForecast():
     def average_apparent_temp(self, start_dt=None, end_dt=None):
         start_dt, end_dt = self.__time_range(start_dt, end_dt)
         query = '''
-            WITH temps AS (
-                SELECT 
-                    APPARENT_TEMPERATURE(temp_avg, humidity, wind) as apt
-                FROM weather
-                WHERE dt BETWEEN {} AND {}
-            )
-            SELECT AVG(apt) from temps
+            SELECT AVG(apparent_temp)
+            FROM weather
+            WHERE dt BETWEEN {} AND {}
         '''.format(start_dt, end_dt)
 
         result = self.cnx.execute(query).fetchone()
@@ -379,6 +371,48 @@ class MultidayForecast():
             SELECT DATE(dt,\'unixepoch\'),MIN(temp_hi)
             FROM weather
             WHERE DATE(dt,\'unixepoch\')=DATE({},\'unixepoch\');
+        '''.format(date.timestamp())
+
+        result = self.cnx.execute(query).fetchone()
+        return {"dt":result[0],"temp":result[1]}
+    
+    def wind_chill_on(self, date):
+        query = '''
+            SELECT
+                DATE(dt,\'unixepoch\'),
+                AVG(wind_chill)
+            FROM weather
+            WHERE DATE(dt,\'unixepoch\')=DATE({},\'unixepoch\')
+        '''.format(date.timestamp())
+        
+        result = self.cnx.execute(query).fetchone()
+        return {"dt":result[0],"wind_chill":result[1]}
+    
+    def heat_index_on(self, date):
+        query = '''
+            SELECT
+                DATE(dt,\'unixepoch\'),
+                AVG(heat_index)
+            FROM weather
+            WHERE DATE(dt,\'unixepoch\')=DATE({},\'unixepoch\')
+        '''.format(date.timestamp())
+
+        result = self.cnx.execute(query).fetchone()
+        return {"dt":result[0],"heat_index":result[1]}
+    
+    def apparent_temp_on(self, date):
+        query = '''
+            WITH temps AS( 
+                SELECT
+                    DATE(dt,\'unixepoch\') AS dt,
+                    AVG(temp_avg) AS temp_avg,
+                    AVG(humidity) AS humidity,
+                    AVG(wind) AS wind
+                FROM weather
+                WHERE DATE(dt,\'unixepoch\')=DATE({},\'unixepoch\')
+            )
+            SELECT dt,APPARENT_TEMPERATURE(temp_avg,humidity,wind) 
+            FROM temps
         '''.format(date.timestamp())
 
         result = self.cnx.execute(query).fetchone()
