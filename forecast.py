@@ -2,7 +2,6 @@ from datetime import datetime, timedelta
 import sqlite3
 import json
 
-
 class Forecast():
     def __init__(self, date, forecast=None):
         self.date = date

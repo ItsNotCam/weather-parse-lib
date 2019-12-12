@@ -40,7 +40,7 @@ class FiveDayForecast():
             print(e)
 
     def populate(self, forecast):
-        days = forecast["list"]
+        days = forecast['forecast']['list']
         try:
             for data in days:
                 date = datetime.strptime(
