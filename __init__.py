@@ -38,3 +38,4 @@ def calc_wc(T,V):
 
 from .forecast import Forecast
 from .fiveday_forecast import FiveDayForecast
+from resources import tts
